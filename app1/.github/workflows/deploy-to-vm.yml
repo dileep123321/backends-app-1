@@ -22,7 +22,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -74,12 +73,14 @@ jobs:
           for m in "${MAP[@]}"; do
             KEY="${m%%:*}"
             SECRET_NAME="${m##*:}"
-            SECRET_VAL=$(gcloud secrets versions access latest --secret="${SECRET_NAME}" --format='get(payload.data)' | base64 --decode 2>/dev/null || true)
+            # fetch secret safely (decode base64 payload)
+            SECRET_VAL=$(gcloud secrets versions access latest --secret="${SECRET_NAME}" --format='get(payload.data)' 2>/dev/null || true)
             if [ -z "${SECRET_VAL}" ]; then
               echo "Secret ${SECRET_NAME} not found or empty" >&2
               exit 1
             fi
-            printf '%s="%s"\n' "${KEY}" "${SECRET_VAL}" >> "${ENVFILE}"
+            # decode and append (avoid printing)
+            printf '%s="%s"\n' "${KEY}" "$(echo "${SECRET_VAL}" | base64 --decode)" >> "${ENVFILE}"
           done
 
           echo "envfile=${ENVFILE}" >> "$GITHUB_OUTPUT"
@@ -94,7 +95,7 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          # Copy artifact and env via IAP tunnel (VM does not need public SSH)
+          # Copy artifact and env via IAP tunnel (VM need not be public)
           gcloud compute scp --quiet --zone="${ZONE}" "${ART}" "${USER}@${VM}:/tmp/${APP}.tar.gz" --tunnel-through-iap
           gcloud compute scp --quiet --zone="${ZONE}" "${ENVFILE}" "${USER}@${VM}:/tmp/${APP}.env" --tunnel-through-iap
 
@@ -106,21 +107,23 @@ jobs:
           ZONE="${{ secrets.TARGET_VM_ZONE }}"
           USER="${{ secrets.TARGET_VM_USER }}"
 
-          REMOTE_CMD=$(cat <<'REMOTE'
+          # remote command: extract, move env, run migrations, restart service
+          REMOTE_CMD=$(cat <<'REMOTE_EOF'
             set -euo pipefail
-            APP="{{APP}}"
-            TARGET_DIR="/opt/apps/${APP}"
+            APP_PLACEHOLDER="{{APP}}"
+            TARGET_DIR="/opt/apps/${APP_PLACEHOLDER}"
             mkdir -p "${TARGET_DIR}"
-            tar -xzf "/tmp/${APP}.tar.gz" -C "${TARGET_DIR}"
-            mv /tmp/${APP}.env "${TARGET_DIR}/.env"
+            tar -xzf "/tmp/${APP_PLACEHOLDER}.tar.gz" -C "${TARGET_DIR}"
+            mv /tmp/${APP_PLACEHOLDER}.env "${TARGET_DIR}/.env"
             chmod 600 "${TARGET_DIR}/.env"
             if [ -x "${TARGET_DIR}/scripts/migrate.sh" ]; then
               bash "${TARGET_DIR}/scripts/migrate.sh" || true
             fi
             systemctl daemon-reload || true
-            systemctl restart ${APP}.service || true
-            echo "deployed ${APP}"
-REMOTE
+            systemctl restart ${APP_PLACEHOLDER}.service || true
+            echo "deployed ${APP_PLACEHOLDER}"
+REMOTE_EOF
 )
-          REMOTE_CMD=$(echo "${REMOTE_CMD}" | sed "s/{{APP}}/${APP}/g")
-          gcloud compute ssh --quiet --zone="${ZONE}" "${USER}@${VM}" --command "${REMOTE_CMD}" --tunnel-through-iap
+          # substitute and run via gcloud ssh (non-interactive)
+          REMOTE_CMD_RENDERED=$(echo "${REMOTE_CMD}" | sed "s/{{APP}}/${APP}/g")
+          gcloud compute ssh --quiet --zone="${ZONE}" "${USER}@${VM}" --command "${REMOTE_CMD_RENDERED}" --tunnel-through-iap
