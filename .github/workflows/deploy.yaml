@@ -11,7 +11,7 @@ jobs:
 
     permissions:
       contents: read
-      id-token: write  # Required for WIF auth
+      id-token: write  # Required for WIF authentication
 
     steps:
       - name: Checkout source
@@ -22,13 +22,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dev dependencies
+      - name: Install dependencies
         run: |
+          pip install -r backend-app/requirements.txt
           pip install -r backend-app/requirements-dev.txt
 
       - name: Run tests
         run: |
-          pytest -q
+          pytest -q backend-app/src/tests
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -55,4 +56,3 @@ jobs:
             --image=asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }} \
             --region=asia-south1 \
             --allow-unauthenticated
-
