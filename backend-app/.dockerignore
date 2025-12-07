@@ -1,0 +1,11 @@
+.git
+.gitignore
+Dockerfile
+.github
+__pycache__
+*.pyc
+.env
+.venv
+venv/
+dist/
+build/
