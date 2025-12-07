@@ -6,3 +6,4 @@ trigger
 trigger
 retry pipeline
 retry
+trigger
