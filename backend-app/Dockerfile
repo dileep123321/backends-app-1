@@ -1,4 +1,4 @@
-# Multi-stage build for smaller, secure image
+# Multi-stage build for a smaller and secure image
 FROM python:3.12-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install build tools only in builder
+# Install build tools in builder only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -16,7 +16,7 @@ RUN pip install --upgrade pip && \
     pip install --prefix=/install -r requirements.txt
 
 # ----------------------------
-# Final runtime image
+# Final lightweight runtime image
 # ----------------------------
 FROM python:3.12-slim
 
@@ -26,10 +26,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy only installed dependencies
+# Copy pre-installed dependencies
 COPY --from=builder /install /usr/local
 
-# Copy application code
+# Copy application source code
 COPY src/ /app/
 
 EXPOSE 8080

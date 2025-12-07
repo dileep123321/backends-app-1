@@ -4,8 +4,8 @@ python-dotenv==1.0.1
 pydantic==2.12.5
 pydantic-core==2.41.5
 
-# REQUIRED SECURITY FIX — fixes CVE-2024-47874
-starlette>=0.40.0
+# FIX for CVE-2024-47874
+starlette==0.38.6
 
-# HTTP client for testing
+# Testing dependency
 httpx==0.27.0
