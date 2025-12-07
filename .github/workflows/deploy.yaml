@@ -28,6 +28,8 @@ jobs:
           pip install -r backend-app/requirements-dev.txt
 
       - name: Run tests
+        env:
+          PYTHONPATH: backend-app/src
         run: |
           pytest -q backend-app/src/tests
 
