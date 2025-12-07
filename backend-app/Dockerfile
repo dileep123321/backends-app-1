@@ -1,5 +1,23 @@
-# Simple, production-friendly but non-distroless image
+# Multi-stage build for smaller, secure image
+FROM python:3.12-slim AS builder
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install build tools only in builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --prefix=/install -r requirements.txt
+
+# ----------------------------
+# Final runtime image
+# ----------------------------
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -8,21 +26,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install build tools if needed by packages, then clean up
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Copy only installed dependencies
+COPY --from=builder /install /usr/local
 
-# Copy dependency file and install
-COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
-
-# Copy application source
+# Copy application code
 COPY src/ /app/
 
 EXPOSE 8080
 
-# Use uvicorn to run the FastAPI app
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
-

@@ -2,61 +2,115 @@ name: Build-Scan-Deploy-to-CloudRun
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
+
+env:
+  PROJECT_ID: kxnwork
+  REGION: asia-south1
+  SERVICE_NAME: backend-app
+  IMAGE_REPO: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       id-token: write
 
     steps:
 
-      - name: Checkout Source
-        uses: actions/checkout@v3
+      # ----------------------------
+      # 1. Checkout source
+      # ----------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      # ----------------------------
+      # 2. Setup Python
+      # ----------------------------
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
-      - name: Install Dev Dependencies
+      - name: Install dependencies
         run: |
-          pip install -r requirements-dev.txt
+          pip install --upgrade pip
+          pip install -r backend-app/requirements.txt
+          pip install -r backend-app/requirements-dev.txt
 
-      - name: Run Unit Tests
-        run: pytest -q
+      # ----------------------------
+      # 3. Lint (flake8)
+      # ----------------------------
+      - name: Run flake8 linting
+        run: |
+          pip install flake8
+          flake8 backend-app/src --max-line-length=150
 
-      - name: Authenticate to Google Cloud (Workload Identity Federation)
+      # ----------------------------
+      # 4. Run unit tests
+      # ----------------------------
+      - name: Run tests
+        env:
+          PYTHONPATH: backend-app/src
+        run: |
+          pytest -q backend-app/src/tests
+
+      # ----------------------------
+      # 5. Authenticate to Google Cloud (OIDC)
+      # ----------------------------
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-          service_account: "github-deployer@kxnwork.iam.gserviceaccount.com"
+          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
+          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
 
-      - name: Configure Docker to push to Artifact Registry
-        run: gcloud auth configure-docker asia-south1-docker.pkg.dev
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build Container Image
+      # ----------------------------
+      # 6. Configure Docker for Artifact Registry
+      # ----------------------------
+      - name: Configure Docker
         run: |
-          IMAGE="asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }}"
-          docker build -t $IMAGE .
+          gcloud auth configure-docker asia-south1-docker.pkg.dev
 
-      - name: Scan Image with Trivy
+      # ----------------------------
+      # 7. Build Docker image
+      # ----------------------------
+      - name: Build Docker image
+        run: |
+          IMAGE_TAG=$(git rev-parse --short HEAD)
+          FULL_IMAGE="$IMAGE_REPO:$IMAGE_TAG"
+          echo "IMAGE_NAME=$FULL_IMAGE" >> $GITHUB_ENV
+          docker build -t "$FULL_IMAGE" backend-app
+
+      # ----------------------------
+      # 8. Push Docker image
+      # ----------------------------
+      - name: Push Docker image
+        run: |
+          docker push "$IMAGE_NAME"
+
+      # ----------------------------
+      # 9. Trivy Security Scan (CRITICAL only)
+      # ----------------------------
+      - name: Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: "asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }}"
-          format: "table"
-          exit-code: "0"
+          image-ref: ${{ env.IMAGE_NAME }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
 
-      - name: Push Image
-        run: |
-          IMAGE="asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }}"
-          docker push $IMAGE
-
+      # ----------------------------
+      # 10. Deploy to Cloud Run
+      # ----------------------------
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy backend-app \
-            --image=asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }} \
-            --region=asia-south1 \
+          gcloud run deploy $SERVICE_NAME \
+            --image "$IMAGE_NAME" \
+            --region $REGION \
             --allow-unauthenticated
