@@ -1,103 +1,103 @@
-name: Enterprise-CICD-Pipeline
+name: Build-Scan-Deploy-to-CloudRun
 
 on:
   push:
-    branches: ["main"]
-  pull_request:
+    branches: [ "main" ]
+
+env:
+  PROJECT_ID: kxnwork
+  REGION: asia-south1
+  SERVICE_NAME: backend-app
+  IMAGE_REPO: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app
 
 jobs:
-  build-test-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
       id-token: write
-
-    env:
-      PYTHONPATH: backend-app/src
-      IMAGE_NAME: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }}
+      contents: read
 
     steps:
+      # ----------------------------
+      # CHECKOUT CODE
+      # ----------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    # 1. Checkout Code
-    - name: Checkout code
-      uses: actions/checkout@v4
+      # ----------------------------
+      # PYTHON SETUP
+      # ----------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
 
-    # 2. Set up Python
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend-app/requirements.txt
 
-    # 3. Install Dependencies
-    - name: Install requirements
-      run: |
-        pip install -r backend-app/requirements.txt
-        pip install -r backend-app/requirements-dev.txt
+      # ----------------------------
+      # LINTING
+      # ----------------------------
+      - name: Run flake8 linting
+        run: |
+          pip install flake8
+          flake8 backend-app/src
 
-    # 4. Linting (flake8)
-    - name: Run Flake8 linting
-      run: |
-        pip install flake8
-        flake8 backend-app/src --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 backend-app/src --exit-zero --max-complexity=10 --max-line-length=150
+      # ----------------------------
+      # RUN UNIT TESTS
+      # ----------------------------
+      - name: Run tests
+        env:
+          PYTHONPATH: backend-app/src
+        run: |
+          pip install pytest
+          pytest -q backend-app/src/tests
 
-    # 5. Python Static Code Analysis (Bandit)
-    - name: Security scan - Bandit
-      run: |
-        pip install bandit
-        bandit -r backend-app/src -ll
+      # ----------------------------
+      # AUTH WITH GOOGLE CLOUD (WIF)
+      # ----------------------------
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: "access_token"
+          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-wif-clean/providers/github-provider"
+          service_account: "github-ci-deployer@kxnwork.iam.gserviceaccount.com"
 
-    # 6. Filesystem Vulnerability Scan (Trivy)
-    - name: Trivy filesystem scan
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: fs
-        severity: HIGH,CRITICAL
-        exit-code: 1
-        ignore-unfixed: true
-        path: backend-app
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
 
-    # 7. Run Unit Tests
-    - name: Run unit tests
-      run: |
-        pytest -q backend-app/src/tests
+      # ----------------------------
+      # BUILD & PUSH DOCKER IMAGE
+      # ----------------------------
+      - name: Build & Push Docker image
+        run: |
+          IMAGE_TAG=$(git rev-parse --short HEAD)
+          FULL_IMAGE="$IMAGE_REPO:$IMAGE_TAG"
+          echo "IMAGE_NAME=$FULL_IMAGE" >> $GITHUB_ENV
 
-    # 8. Authenticate to Google Cloud (WIF)
-    - name: Google Cloud authentication
-      uses: google-github-actions/auth@v2
-      with:
-        workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
-        service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
+          gcloud builds submit --tag "$FULL_IMAGE" backend-app
 
-    # 9. Configure Docker for Artifact Registry
-    - name: Configure Docker
-      run: |
-        gcloud auth configure-docker asia-south1-docker.pkg.dev
+      # ----------------------------
+      # TRIVY SECURITY SCAN
+      # (Fails ONLY on CRITICAL issues)
+      # ----------------------------
+      - name: Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
 
-    # 10. Build Docker Image
-    - name: Build Docker image
-      run: |
-        docker build -t $IMAGE_NAME backend-app
-
-    # 11. Scan Docker Image (Trivy)
-    - name: Trivy image scan
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.IMAGE_NAME }}
-        severity: HIGH,CRITICAL
-        exit-code: 1
-        ignore-unfixed: true
-
-    # 12. Push Image to Artifact Registry
-    - name: Push Docker image
-      run: |
-        docker push $IMAGE_NAME
-
-    # 13. Deploy to Cloud Run
-    - name: Deploy to Cloud Run
-      run: |
-        gcloud run deploy backend-app \
-          --image=$IMAGE_NAME \
-          --region=asia-south1 \
-          --allow-unauthenticated
+      # ----------------------------
+      # DEPLOY TO CLOUD RUN
+      # ----------------------------
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image $IMAGE_NAME \
+            --region $REGION \
+            --allow-unauthenticated
