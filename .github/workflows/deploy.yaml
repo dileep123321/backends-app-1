@@ -2,7 +2,8 @@ name: Build-Scan-Deploy-to-CloudRun
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
 
 env:
   PROJECT_ID: kxnwork
@@ -15,92 +16,113 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write
       contents: read
+      id-token: write  # Required for Workload Identity Federation
 
     steps:
-      # ----------------------------------------------------------
-      # CHECKOUT THE REPOSITORY
-      # ----------------------------------------------------------
-      - name: Checkout code
+      # -----------------------------------
+      # CHECKOUT CODE
+      # -----------------------------------
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      # ----------------------------------------------------------
-      # SET UP PYTHON AND INSTALL DEPENDENCIES
-      # ----------------------------------------------------------
+      # -----------------------------------
+      # PYTHON SETUP
+      # -----------------------------------
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r backend-app/requirements.txt
           pip install -r backend-app/requirements-dev.txt
+          pip install flake8 bandit httpx pytest
 
-      # ----------------------------------------------------------
-      # PYTHON LINTING (flake8)
-      # ----------------------------------------------------------
+      # -----------------------------------
+      # LINT
+      # -----------------------------------
       - name: Run flake8 linting
-        run: |
-          pip install flake8
-          flake8 backend-app/src
+        run: flake8 backend-app/src
 
-      # ----------------------------------------------------------
-      # RUN UNIT TESTS
-      # ----------------------------------------------------------
-      - name: Run unit tests
-        env:
-          PYTHONPATH: backend-app/src
-        run: |
-          pip install pytest
-          pytest -q backend-app/src/tests
+      # -----------------------------------
+      # SECURITY SCAN (Bandit)
+      # -----------------------------------
+      - name: Run Bandit security scan
+        run: bandit -r backend-app/src -ll
 
-      # ----------------------------------------------------------
-      # GOOGLE CLOUD AUTHENTICATION USING WIF (OIDC)
-      # ----------------------------------------------------------
-      - name: Authenticate to Google Cloud via WIF
-        uses: google-github-actions/auth@v2
-        with:
-          token_format: "access_token"
-          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-wif-clean/providers/github-provider"
-          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
-          create_credentials_file: true
-          export_environment_variables: true
-          access_token_scopes: https://www.googleapis.com/auth/cloud-platform
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-
-      # ----------------------------------------------------------
-      # BUILD AND PUSH IMAGE USING CLOUD BUILD
-      # ----------------------------------------------------------
-      - name: Build & push Docker image to Artifact Registry
-        run: |
-          IMAGE_TAG=$(git rev-parse --short HEAD)
-          FULL_IMAGE="$IMAGE_REPO:$IMAGE_TAG"
-          echo "IMAGE_NAME=$FULL_IMAGE" >> $GITHUB_ENV
-
-          gcloud builds submit --tag "$FULL_IMAGE" backend-app
-
-      # ----------------------------------------------------------
-      # TRIVY IMAGE SCAN (FAIL ONLY ON CRITICAL)
-      # ----------------------------------------------------------
-      - name: Trivy Image Scan
+      # -----------------------------------
+      # TRIVY FILESYSTEM SCAN
+      # -----------------------------------
+      - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.IMAGE_NAME }}
-          severity: CRITICAL
+          scan-type: fs
+          path: backend-app
+          severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: 1
 
-      # ----------------------------------------------------------
+      # -----------------------------------
+      # UNIT TESTS
+      # -----------------------------------
+      - name: Run tests
+        env:
+          PYTHONPATH: backend-app/src
+        run: pytest -q backend-app/src/tests
+
+      # -----------------------------------
+      # GOOGLE CLOUD AUTH (OIDC/WIF)
+      # -----------------------------------
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
+          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # -----------------------------------
+      # DOCKER AUTH FOR ARTIFACT REGISTRY
+      # -----------------------------------
+      - name: Configure Docker
+        run: gcloud auth configure-docker asia-south1-docker.pkg.dev
+
+      # -----------------------------------
+      # BUILD DOCKER IMAGE (NO CLOUD BUILD!)
+      # -----------------------------------
+      - name: Build Docker image
+        run: |
+          IMAGE="${IMAGE_REPO}:${{ github.sha }}"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          docker build -t "$IMAGE" backend-app
+
+      # -----------------------------------
+      # TRIVY IMAGE SCAN
+      # -----------------------------------
+      - name: Scan Docker Image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+      # -----------------------------------
+      # PUSH DOCKER IMAGE
+      # -----------------------------------
+      - name: Push Docker image
+        run: docker push "${{ env.IMAGE }}"
+
+      # -----------------------------------
       # DEPLOY TO CLOUD RUN
-      # ----------------------------------------------------------
+      # -----------------------------------
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy $SERVICE_NAME \
-            --image $IMAGE_NAME \
-            --region $REGION \
+            --image="${{ env.IMAGE }}" \
+            --region=$REGION \
             --allow-unauthenticated
+
