@@ -2,7 +2,7 @@ name: Build-Scan-Deploy-to-CloudRun
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   PROJECT_ID: kxnwork
@@ -19,60 +19,64 @@ jobs:
       contents: read
 
     steps:
-      # ----------------------------
-      # CHECKOUT CODE
-      # ----------------------------
+      # ----------------------------------------------------------
+      # CHECKOUT THE REPOSITORY
+      # ----------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ----------------------------
-      # PYTHON SETUP
-      # ----------------------------
-      - name: Setup Python
+      # ----------------------------------------------------------
+      # SET UP PYTHON AND INSTALL DEPENDENCIES
+      # ----------------------------------------------------------
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend-app/requirements.txt
+          pip install -r backend-app/requirements-dev.txt
 
-      # ----------------------------
-      # LINTING
-      # ----------------------------
+      # ----------------------------------------------------------
+      # PYTHON LINTING (flake8)
+      # ----------------------------------------------------------
       - name: Run flake8 linting
         run: |
           pip install flake8
-          flake8 backend-app/src|| true
+          flake8 backend-app/src
 
-      # ----------------------------
+      # ----------------------------------------------------------
       # RUN UNIT TESTS
-      # ----------------------------
-      - name: Run tests
+      # ----------------------------------------------------------
+      - name: Run unit tests
         env:
           PYTHONPATH: backend-app/src
         run: |
           pip install pytest
           pytest -q backend-app/src/tests
 
-      # ----------------------------
-      # AUTH WITH GOOGLE CLOUD (WIF)
-      # ----------------------------
-      - name: Authenticate to Google Cloud
+      # ----------------------------------------------------------
+      # GOOGLE CLOUD AUTHENTICATION USING WIF (OIDC)
+      # ----------------------------------------------------------
+      - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
         with:
           token_format: "access_token"
           workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-wif-clean/providers/github-provider"
-          service_account: "github-ci-deployer@kxnwork.iam.gserviceaccount.com"
+          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
+          create_credentials_file: true
+          export_environment_variables: true
+          access_token_scopes: https://www.googleapis.com/auth/cloud-platform
 
-      - name: Setup gcloud
+      - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
-      # ----------------------------
-      # BUILD & PUSH DOCKER IMAGE
-      # ----------------------------
-      - name: Build & Push Docker image
+      # ----------------------------------------------------------
+      # BUILD AND PUSH IMAGE USING CLOUD BUILD
+      # ----------------------------------------------------------
+      - name: Build & push Docker image to Artifact Registry
         run: |
           IMAGE_TAG=$(git rev-parse --short HEAD)
           FULL_IMAGE="$IMAGE_REPO:$IMAGE_TAG"
@@ -80,11 +84,10 @@ jobs:
 
           gcloud builds submit --tag "$FULL_IMAGE" backend-app
 
-      # ----------------------------
-      # TRIVY SECURITY SCAN
-      # (Fails ONLY on CRITICAL issues)
-      # ----------------------------
-      - name: Trivy Scan
+      # ----------------------------------------------------------
+      # TRIVY IMAGE SCAN (FAIL ONLY ON CRITICAL)
+      # ----------------------------------------------------------
+      - name: Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_NAME }}
@@ -92,9 +95,9 @@ jobs:
           ignore-unfixed: true
           exit-code: 1
 
-      # ----------------------------
+      # ----------------------------------------------------------
       # DEPLOY TO CLOUD RUN
-      # ----------------------------
+      # ----------------------------------------------------------
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy $SERVICE_NAME \
