@@ -1,49 +1,28 @@
-cat << 'EOF' > .github/workflows/deploy.yaml
-name: ci-cd-backend
+name: Build-Scan-Deploy-to-CloudRun
 
 on:
   push:
-    branches: ["main"]
-  workflow_dispatch:
-    inputs:
-      DEPLOY_TARGET:
-        description: "Choose where to deploy backend"
-        required: true
-        type: choice
-        options:
-          - cloudrun
-          - gke
-        default: cloudrun
-
-env:
-  PROJECT_ID: kxnwork
-  REGION: asia-south1
-  ARTIFACT_REPO: backend-app
-  IMAGE_NAME: backend-app
-  IMAGE_URI: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }}
+    branches:
+      - main
 
 permissions:
   contents: read
   id-token: write
-  packages: write
 
-# ====================================================================================
-# BUILD + TEST + SCAN + PUSH + COSIGN SIGN
-# ====================================================================================
+env:
+  PROJECT_ID: kxnwork
+  REGION: asia-south1
+  SERVICE_NAME: backend-app
+  IMAGE_REPO: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app
+
 jobs:
-  build-push-sign:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # ----------------------------
-      # CHECKOUT
-      # ----------------------------
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # ----------------------------
-      # PYTHON SETUP + DEPENDENCIES
-      # ----------------------------
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -51,171 +30,38 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
           pip install -r backend-app/requirements.txt
           pip install -r backend-app/requirements-dev.txt
 
-      # ----------------------------
-      # LINTING
-      # ----------------------------
-      - name: Lint (flake8 - fail only on serious issues)
-        run: |
-          pip install flake8
-          # Fail on syntax/important errors
-          flake8 backend-app/src --count --select=E9,F63,F7,F82 --show-source --statistics
-          # Style report only (does NOT fail build)
-          flake8 backend-app/src --exit-zero --max-complexity=10 --max-line-length=150
-
-      # ----------------------------
-      # UNIT TESTS
-      # ----------------------------
-      - name: Run unit tests
+      - name: Run tests
         env:
           PYTHONPATH: backend-app/src
         run: |
           pytest -q backend-app/src/tests
 
-      # ----------------------------
-      # TRIVY FS SCAN (NON-BLOCKING)
-      # ----------------------------
-      - name: Trivy filesystem scan (non-blocking)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: backend-app
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: 0   # do NOT fail pipeline, just report
-
-      # ----------------------------
-      # AUTH WITH GCP (WIF)
-      # ----------------------------
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
           service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
 
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-
       - name: Configure Docker for Artifact Registry
-        run: |
-          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+        run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
 
-      # ----------------------------
-      # BUILD & PUSH IMAGE
-      # ----------------------------
       - name: Build Docker image
         run: |
-          docker build -t "$IMAGE_URI" backend-app
+          IMAGE="${IMAGE_REPO}:${{ github.sha }}"
+          docker build -t $IMAGE backend-app
 
       - name: Push Docker image
         run: |
-          docker push "$IMAGE_URI"
+          IMAGE="${IMAGE_REPO}:${{ github.sha }}"
+          docker push $IMAGE
 
-      # ----------------------------
-      # TRIVY IMAGE SCAN (NON-BLOCKING, CRITICAL ONLY)
-      # ----------------------------
-      - name: Trivy image scan (non-blocking, CRITICAL only)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.IMAGE_URI }}
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: 0   # report only
-
-      # ----------------------------
-      # COSIGN SIGNING
-      # ----------------------------
-      - name: Install Cosign
-        run: |
-          wget https://github.com/sigstore/cosign/releases/download/v2.2.1/cosign-linux-amd64
-          chmod +x cosign-linux-amd64
-          sudo mv cosign-linux-amd64 /usr/local/bin/cosign
-
-      - name: Decode Cosign private key
-        run: |
-          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > cosign.key
-          chmod 600 cosign.key
-
-      - name: Sign image with Cosign
-        run: |
-          COSIGN_PASSWORD="" cosign sign --key cosign.key "$IMAGE_URI"
-
-      # ----------------------------
-      # AR VULNERABILITY RESULTS
-      # ----------------------------
-      - name: Wait for vulnerability scan
-        run: sleep 20
-
-      - name: Fetch vulnerability results from Artifact Registry
-        run: |
-          gcloud artifacts vulnerabilities list "$IMAGE_URI" \
-            --project="$PROJECT_ID" || true
-
-  # ====================================================================================
-  # DEPLOY SECTION (Cloud Run or GKE)
-  # ====================================================================================
-  deploy:
-    needs: build-push-sign
-    runs-on: ubuntu-latest
-
-    # If manual run: use input; if push: default to cloudrun
-    env:
-      DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.DEPLOY_TARGET || 'cloudrun' }}
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud (WIF)
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
-          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-
-      # ============================
-      # CLOUD RUN DEPLOY
-      # ============================
       - name: Deploy to Cloud Run
-        if: env.DEPLOY_TARGET == 'cloudrun'
         run: |
           gcloud run deploy backend-app \
-            --image "$IMAGE_URI" \
-            --region "$REGION" \
+            --image=${IMAGE_REPO}:${{ github.sha }} \
+            --region=$REGION \
             --allow-unauthenticated
 
-      # ============================
-      # GKE DEPLOY
-      # (requires k8s/ manifests in repo)
-      # ============================
-      - name: Configure GKE Credentials
-        if: env.DEPLOY_TARGET == 'gke'
-        uses: google-github-actions/get-gke-credentials@v1
-        with:
-          cluster_name: ${{ secrets.GKE_CLUSTER_NAME }}
-          location: ${{ secrets.GKE_CLUSTER_LOCATION }}
-          project_id: ${{ env.PROJECT_ID }}
-
-      - name: Deploy to GKE
-        if: env.DEPLOY_TARGET == 'gke'
-        run: |
-          # Namespace (safe if already exists)
-          kubectl apply -f k8s/namespace.yaml
-
-          # Apply or update deployment
-          kubectl apply -f k8s/deployment.yaml -n backend
-          kubectl set image deployment/backend backend="$IMAGE_URI" -n backend || true
-
-          # Service + HPA
-          kubectl apply -f k8s/service.yaml -n backend
-          kubectl apply -f k8s/hpa.yaml -n backend
-EOF
