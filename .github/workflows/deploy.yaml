@@ -1,6 +1,8 @@
 name: deploy-backend
 
 on:
+  push:
+    branches: ["main"]     # <-- Pipeline will now run on push
   workflow_dispatch:
     inputs:
       DEPLOY_SWITCH:
@@ -23,12 +25,8 @@ permissions:
 
 jobs:
 
-  # ==============================================
-  # BUILD + PUSH IMAGE
-  # ==============================================
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -50,9 +48,6 @@ jobs:
         run: docker push $IMAGE_URI
 
 
-  # ==============================================
-  # DEPLOY (Switch-based)
-  # ==============================================
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -68,10 +63,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-
-      # -----------------------------
-      # Cloud Run Deploy (SWITCH = ON)
-      # -----------------------------
       - name: Deploy to Cloud Run (Switch = ON)
         if: ${{ github.event.inputs.DEPLOY_SWITCH == 'on' }}
         run: |
@@ -81,10 +72,6 @@ jobs:
             --region $REGION \
             --allow-unauthenticated
 
-
-      # -----------------------------
-      # GKE Deploy (SWITCH = OFF)
-      # -----------------------------
       - name: Configure GKE Access (Switch = OFF)
         if: ${{ github.event.inputs.DEPLOY_SWITCH == 'off' }}
         uses: google-github-actions/get-gke-credentials@v2
@@ -102,3 +89,4 @@ jobs:
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
           kubectl apply -f k8s/hpa.yaml
+
