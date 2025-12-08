@@ -1,18 +1,16 @@
 name: deploy-backend
 
 on:
-  push:
-    branches: ["main"]     # <-- Pipeline will now run on push
   workflow_dispatch:
     inputs:
-      DEPLOY_SWITCH:
-        description: "Deployment switch (ON = Cloud Run, OFF = GKE)"
+      DEPLOY_TARGET:
+        description: "Select Deployment Target"
         required: true
         type: choice
         options:
-          - on
-          - off
-        default: on
+          - cloudrun
+          - gke
+        default: cloudrun
 
 env:
   PROJECT_ID: kxnwork
@@ -25,8 +23,12 @@ permissions:
 
 jobs:
 
+  # ================================
+  # BUILD + PUSH IMAGE
+  # ================================
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +49,9 @@ jobs:
       - name: Push Image
         run: docker push $IMAGE_URI
 
-
+  # ================================
+  # DEPLOYMENT (CLOUDRUN / GKE)
+  # ================================
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -63,28 +67,31 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy to Cloud Run (Switch = ON)
-        if: ${{ github.event.inputs.DEPLOY_SWITCH == 'on' }}
+      # CLOUD RUN DEPLOY
+      - name: Deploy to Cloud Run
+        if: ${{ github.event.inputs.DEPLOY_TARGET == 'cloudrun' }}
         run: |
-          echo "Deploy switch = ON → Deploying to Cloud Run"
+          echo "Deploying to Cloud Run..."
           gcloud run deploy backend-app \
             --image $IMAGE_URI \
             --region $REGION \
             --allow-unauthenticated
 
-      - name: Configure GKE Access (Switch = OFF)
-        if: ${{ github.event.inputs.DEPLOY_SWITCH == 'off' }}
+      # GKE CONFIG + DEPLOY
+      - name: Configure GKE Access
+        if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
         uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: ${{ secrets.GKE_CLUSTER_NAME }}
           location: ${{ secrets.GKE_CLUSTER_LOCATION }}
-          project_id: kxnwork
+          project_id: ${{ env.PROJECT_ID }}
 
-      - name: Deploy to GKE (Switch = OFF)
-        if: ${{ github.event.inputs.DEPLOY_SWITCH == 'off' }}
+      - name: Deploy to GKE
+        if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
         run: |
-          echo "Deploy switch = OFF → Deploying to GKE"
+          echo "Deploying to GKE..."
           sed -i "s|REPLACE_ME_IMAGE|$IMAGE_URI|g" k8s/deployment.yaml
+
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
