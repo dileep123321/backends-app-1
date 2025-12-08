@@ -1,13 +1,13 @@
-name: Build-Scan-Deploy
+name: ci-cd-backend-advanced
 
 on:
   push:
-    branches:
-      - main
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       DEPLOY_TARGET:
         description: "Choose deployment target"
+        required: true
         type: choice
         options:
           - cloudrun
@@ -17,24 +17,24 @@ on:
 env:
   PROJECT_ID: kxnwork
   REGION: asia-south1
-  IMAGE_REPO: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app
-  IMAGE_TAG: ${{ github.sha }}
   IMAGE_URI: asia-south1-docker.pkg.dev/kxnwork/backend-app/backend-app:${{ github.sha }}
 
 permissions:
   contents: read
   id-token: write
 
+# ===================================================
+# JOB 1 — BUILD + TEST + SCAN + PUSH
+# ===================================================
 jobs:
-
-  build:
+  build-push:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
@@ -49,12 +49,14 @@ jobs:
           PYTHONPATH: backend-app/src
         run: pytest -q backend-app/src/tests
 
-      - name: Authenticate to Google Cloud
+      # -------------------------------
+      # GOOGLE CLOUD AUTH (WIF)
+      # -------------------------------
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SA_EMAIL }}
-          project_id: kxnwork
+          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
+          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -62,40 +64,52 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker asia-south1-docker.pkg.dev
 
-      - name: Build Docker Image
+      # -------------------------------
+      # BUILD + PUSH
+      # -------------------------------
+      - name: Build Docker image
         run: docker build -t $IMAGE_URI backend-app
 
-      - name: Push Docker Image
+      - name: Push Docker image
         run: docker push $IMAGE_URI
 
-      - name: Trivy Scan (OS Packages Only — Skip Python)
+      # -------------------------------
+      # TRIVY — OS-ONLY SCAN (NO PYTHON)
+      # -------------------------------
+      - name: Trivy Scan (OS-only)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_URI }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
           scanners: vuln
           vuln-type: os
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
           exit-code: 1
 
+
+# ===================================================
+# JOB 2 — DEPLOY (CLOUD RUN / GKE SWITCH)
+# ===================================================
   deploy:
-    needs: build
+    needs: build-push
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SA_EMAIL }}
-          project_id: kxnwork
+          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/backend-app-pool/providers/backend-app-provider"
+          service_account: "ci-backend-deployer@kxnwork.iam.gserviceaccount.com"
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      # -------------------------------
+      # CLOUD RUN
+      # -------------------------------
       - name: Deploy to Cloud Run
         if: ${{ github.event.inputs.DEPLOY_TARGET == 'cloudrun' }}
         run: |
@@ -104,19 +118,23 @@ jobs:
             --region $REGION \
             --allow-unauthenticated
 
-      - name: Get GKE Credentials
+      # -------------------------------
+      # GKE
+      # -------------------------------
+      - name: Configure GKE Access
         if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
         uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: ${{ secrets.GKE_CLUSTER_NAME }}
           location: ${{ secrets.GKE_CLUSTER_LOCATION }}
-          project_id: kxnwork
+          project_id: ${{ env.PROJECT_ID }}
 
       - name: Deploy to GKE
         if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
         run: |
+          sed -i "s|REPLACE_ME_IMAGE|$IMAGE_URI|g" k8s/deployment.yaml
+
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/deployment.yaml -n backend
-          kubectl set image deployment/backend backend=$IMAGE_URI -n backend
-          kubectl apply -f k8s/service.yaml -n backend
-          kubectl apply -f k8s/hpa.yaml -n backend
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/hpa.yaml
